@@ -58,44 +58,44 @@ public class Worker {
     }
 
 
-    private static String getText(PDDocument doc) throws IOException {
-        PDFTextStripper reader = new PDFTextStripper();
-        reader.setStartPage(1);
-        reader.setEndPage(1);
-        return reader.getText(doc);
-    }
-
-
     public static void toImage(PDPage page, String base) {
+        String fileName = base + ".png";
+        logger.info("image: " + fileName);
+
         try {
-            BufferedImage image = page.convertToImage();
-            File outputFile = new File(base + ".png");
-            ImageIO.write(image, "png", outputFile);
-        } catch (IOException e) {}  // TODO same
+            BufferedImage img = page.convertToImage();
+            File outputFile = new File(fileName);
+            ImageIO.write(img, "png", outputFile);
+        } catch (IOException e) {
+            logger.severe(e.getMessage());
+        }
     }
 
 
     public static void toHTML(PDDocument doc, String base) {
+        String fileName = base + ".html";
+        logger.info("html: " + fileName);
+
         String result;
         PrintWriter out;
-        PDFTextStripper htmlstripper = null;
+        PDFTextStripper stripper;
 
         try {
-            htmlstripper = new PDFText2HTML("utf-8");
+            stripper = new PDFText2HTML("utf-8");
         } catch (IOException e) {
             logger.severe(e.getMessage());
             return;
         }
 
         try {
-            result = htmlstripper.getText(doc).trim();
+            result = stripper.getText(doc).trim();
         } catch (IOException e) {
             logger.severe(e.getMessage());
             return;
         }
 
         try {
-            out = new PrintWriter(base + ".html");
+            out = new PrintWriter(fileName);
         } catch (FileNotFoundException e) {
             logger.severe(e.getMessage());
             return;
@@ -107,18 +107,25 @@ public class Worker {
 
 
     public static void toText(PDDocument doc, String base) {
+        String fileName = base + ".txt";
+        logger.info("text: " + fileName);
+
+        PDFTextStripper stripper;
         String pageText;
         PrintWriter out;
 
         try {
-            pageText = getText(doc);
+            stripper = new PDFTextStripper();
+            stripper.setStartPage(1);
+            stripper.setEndPage(1);
+            pageText = stripper.getText(doc);
         } catch (IOException e) {
             logger.severe(e.getMessage());
             return;
         }
 
         try {
-            out = new PrintWriter(base + ".txt");
+            out = new PrintWriter(fileName);
         } catch (FileNotFoundException e) {
             logger.severe(e.getMessage());
             return;
@@ -129,8 +136,8 @@ public class Worker {
     }
 
 
-    public static void handlePage(String action, String url) {
-        logger.info(action + " " + url);
+    public static void handleDocument(String action, String url) {
+        logger.info("handling: " + action + "\t" + url);
 
         String base = FilenameUtils.getBaseName(url);  // url file base name.
         PDDocument doc = getDocument(url);
@@ -155,60 +162,101 @@ public class Worker {
         } catch (IOException e) {
             logger.severe(e.getMessage());
         }
-    }
-    
-    public static void deleteMessage(Message message, String sqsUrl,AmazonSQS sqs) {
-        String messageRecieptHandle = message.getReceiptHandle();
-        sqs.deleteMessage(new DeleteMessageRequest(sqsUrl, messageRecieptHandle));
-        logger.info("Deleted : "+ message.getBody() + "from sqsMissions.\n");
-    }
-    
-    public static void sendMessage(Message message, String sqsUrl,AmazonSQS sqs) {
-        String[] messageSpliter= message.getBody().split("\t");
-        String action = messageSpliter[0];
-        String Url = messageSpliter[1];
-        sqs.sendMessage(new SendMessageRequest(sqsUrl, "Finish: "+action+" "+Url));
-        logger.info("Sent : Finished "+message.getBody()+" to sqsFinished.\n");
-    }
-    
-    public static void handleMessage(Message message) {
-        logger.info("Got message from sqsMissions : "+message.getBody()+ " .\n");
-        String[] messageSpliter= message.getBody().split("\t");
-        String action = messageSpliter[0];
-        String Url = messageSpliter[1];
-        handlePage(action,Url);
-        logger.info("Finished "+action+" "+Url);
-    }
-    
-    public static  List<Message> getMessages(ReceiveMessageRequest receiveMessageRequest,AmazonSQS sqs) {
-        List<Message> messages = sqs.receiveMessage(receiveMessageRequest).getMessages();
-        logger.info("Received new message from sqsMissions.\n");
-        return messages;
+
+        logger.info("finished handling: " + action + "\t" + url);
     }
 
+
+    public static void deleteTaskMessage(Message msg, String sqsUrl, AmazonSQS sqs) {
+        String handle = msg.getReceiptHandle();
+        sqs.deleteMessage(new DeleteMessageRequest(sqsUrl, handle));
+        logger.info("deleted: " + msg.getBody());
+    }
+
+
+    public static void sendFinishedMessage(Message msg, String sqsUrl, AmazonSQS sqs) {
+        String[] splitter= msg.getBody().split("\t");
+        String action = splitter[0],
+               url = splitter[1],
+               reply = "done PDF task " + action + " " + url;  // TODO need to add s3 location of result, according to instructions.
+
+        sqs.sendMessage(new SendMessageRequest(sqsUrl, reply));
+        logger.info(reply);
+    }
+
+
+    public static boolean handleMessage(Message msg) {
+        String body = msg.getBody();
+        logger.info("received: " + body);
+
+        String[] parts = msg.getBody().split("\t");
+        String type, action, url;
+
+        if (parts.length == 3) {
+            type = parts[0];
+            action = parts[1];
+            url = parts[2];
+        } else {
+            logger.info("ignoring: " + body);
+            return false;
+        }
+
+        if (type.equals("new PDF task")) {
+            handleDocument(action, url);
+            return true;
+        } else {
+            logger.info("ignoring: " + body);
+            return false;
+        }
+    }
+
+
+    public static List<Message> getMessages(ReceiveMessageRequest req, AmazonSQS sqs) {
+        List<Message> msgs = sqs.receiveMessage(req).getMessages();
+        logger.info("sqs messages received.");
+        return msgs;
+    }
+
+
     public static void main(String[] args) throws Exception {
-        String MissionsUrl =  "https://sqs.us-west-2.amazonaws.com/340657073537/Missions";
-        String FinishedUrl =  "https://sqs.us-west-2.amazonaws.com/340657073537/Finished";
-        String bucketName = "dsp-ass1";
-        AWSCredentials credentials = new PropertiesCredentials(Worker.class.getResourceAsStream("AwsCredentials.properties"));
-        AmazonSQS sqsMissions = new AmazonSQSClient(credentials);
-        AmazonSQS sqsFinished = new AmazonSQSClient(credentials);
-        AmazonS3 s3 = new AmazonS3Client(credentials);
+        // Use Ireland region.
+        String missionsUrl = "https://sqs.eu-west-1.amazonaws.com/340657073537/tasks",
+               finishedUrl = "https://sqs.eu-west-1.amazonaws.com/340657073537/finished",
+               bucketName = "dsp-ass1";
+
+        AWSCredentials creds = new PropertiesCredentials(
+                Worker.class.getResourceAsStream("/AWSCredentials.properties"));
+
+        AmazonSQS sqsMissions = new AmazonSQSClient(creds),
+                  sqsFinished = new AmazonSQSClient(creds);
+
+        AmazonS3 s3 = new AmazonS3Client(creds);
+
+        ReceiveMessageRequest req;
+
+        List<Message> msgs;
+
         try {
-            ReceiveMessageRequest receiveMessageRequest = new ReceiveMessageRequest(MissionsUrl);
-            List<Message> messages = getMessages(receiveMessageRequest,sqsMissions);
-            while (messages.size()>0){
-                Message message=messages.get(0);
-                handleMessage(message);                                    // Handling message
-                deleteMessage(message,MissionsUrl,sqsMissions);            // Deleting message
-                sendMessage(message, FinishedUrl,sqsFinished);             // Sending message
-                messages = getMessages(receiveMessageRequest,sqsMissions); // getting new message
-            }
-            logger.info("Done!.\n");
+            req = new ReceiveMessageRequest(missionsUrl);
         } catch (AmazonServiceException ase) {
             logger.severe(ase.getMessage());
+            return;
         } catch (AmazonClientException ace) {
             logger.severe(ace.getMessage());
+            return;
         }
+
+        msgs = getMessages(req, sqsMissions);
+        while (msgs.size() > 0) {
+            Message msg = msgs.get(0);
+            if (handleMessage(msg)) {
+                deleteTaskMessage(msg, missionsUrl, sqsMissions);
+                sendFinishedMessage(msg, finishedUrl, sqsFinished);
+            }
+
+            msgs = getMessages(req, sqsMissions);
+        }
+
+        logger.info("finished messages.");
     }
 }
